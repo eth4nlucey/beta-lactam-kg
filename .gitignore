@@ -1,0 +1,19 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Mac system files
+.DS_Store
+
+# Data & results
+data/
+results/
+
+# Logs
+*.log

@@ -1,0 +1,14 @@
+# Core
+requests==2.31.0
+pandas==2.2.2
+numpy==1.26.4
+
+# Graph ML
+pykeen==1.10.1
+
+# Optional for visualisation or graph processing
+networkx==3.3
+matplotlib==3.8.4
+
+# Jupyter (for notebooks)
+jupyterlab==4.1.8
