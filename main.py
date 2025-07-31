@@ -2,6 +2,12 @@ from scripts.string_api import get_string_interactions
 from scripts.tsv_to_triples import string_tsv_to_triples
 from scripts.train_kg_model import train_pykeen_model
 from scripts.predict_links import predict_tail_entities
+from scripts.drugbank_parser import parse_drugbank_xml, drugbank_to_triples
+
+# Test DrugBank parsing
+beta_lactams = parse_drugbank_xml("data/drugbank/full-database.xml")
+print(f"Found {len(beta_lactams)} β-lactam antibiotics")
+drugbank_to_triples(beta_lactams, "data/drugbank_triples.tsv")
 
 # --- Step 1: Define known targets of amoxicillin (E. coli proteins)
 amoxicillin_targets = ["PBP2B", "ftsI", "murA"]
@@ -25,7 +31,7 @@ string_tsv_to_triples(
 
 # --- Step 4: Train a link prediction model using PyKEEN
 train_pykeen_model(
-    triple_path="data/kg_triples.tsv",
+    triple_path="data/comprehensive_kg.tsv",
     output_path="results/amoxicillin_kg"
 )
 
@@ -36,7 +42,7 @@ candidates = ["murA", "PBP2B"]
 try:
     top_predictions = predict_tail_entities(
         model_path="results/amoxicillin_kg/trained_model.pkl",
-        triples_path="data/kg_triples.tsv",
+        triples_path="data/comprehensive_kg.tsv",
         head="ftsI",
         relation="interacts_with",
         candidates=candidates
