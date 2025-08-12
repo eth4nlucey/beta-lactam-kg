@@ -29,22 +29,42 @@ app.add_middleware(
 
 def load_config() -> dict:
     """Load configuration from YAML file."""
-    config_path = Path("../config.yaml")
-    if not config_path.exists():
-        config_path = Path("config.yaml")
+    # Try multiple possible config locations
+    possible_paths = [
+        Path("../config.yaml"),  # From api/ directory
+        Path("config.yaml"),     # From api/ directory
+        Path("../../config.yaml"), # From project root
+        Path("/Users/ethanlucey/Desktop/Diss/beta-lactam-kg/config.yaml")  # Absolute path
+    ]
     
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
+    for config_path in possible_paths:
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                return yaml.safe_load(f)
+    
+    raise FileNotFoundError("Could not find config.yaml in any expected location")
 
 def get_results_dir() -> Path:
     """Get results directory path."""
     config = load_config()
-    return Path(config['paths']['results_dir'])
+    # Convert to absolute path if relative
+    results_path = Path(config['paths']['results_dir'])
+    if not results_path.is_absolute():
+        # Assume relative to project root
+        project_root = Path("/Users/ethanlucey/Desktop/Diss/beta-lactam-kg")
+        results_path = project_root / results_path
+    return results_path
 
 def get_kg_dir() -> Path:
     """Get knowledge graph directory path."""
     config = load_config()
-    return Path(config['paths']['kg_dir'])
+    # Convert to absolute path if relative
+    kg_path = Path(config['paths']['kg_dir'])
+    if not kg_path.is_absolute():
+        # Assume relative to project root
+        project_root = Path("/Users/ethanlucey/Desktop/Diss/beta-lactam-kg")
+        kg_path = project_root / kg_path
+    return kg_path
 
 @app.get("/")
 async def root():
@@ -265,9 +285,36 @@ async def get_kg_sample(n: int = 500):
                 "source_db": row.get('source', 'unknown')
             })
         
+        # Convert to Cytoscape format
+        elements = []
+        
+        # Add nodes
+        for node in nodes:
+            elements.append({
+                "data": {
+                    "id": node["id"],
+                    "label": node["label"],
+                    "type": node["type"]
+                },
+                "group": "nodes"
+            })
+        
+        # Add edges
+        for edge in edges:
+            elements.append({
+                "data": {
+                    "id": f"{edge['source']}-{edge['target']}",
+                    "source": edge["source"],
+                    "target": edge["target"],
+                    "relation": edge["relation"],
+                    "weight": edge["weight"],
+                    "source_db": edge["source_db"]
+                },
+                "group": "edges"
+            })
+        
         return {
-            "nodes": nodes,
-            "edges": edges,
+            "elements": elements,
             "total_nodes": len(nodes),
             "total_edges": len(edges)
         }
