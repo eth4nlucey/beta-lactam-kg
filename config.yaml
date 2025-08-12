@@ -10,6 +10,7 @@ kg:
 # Data Sources
 data_sources:
   drugbank: data/drugbank/full-database.xml
+  drugbank_edges: data/drugbank_edges.tsv
   string: data/string_interactions.tsv
   chembl: data/chembl_targets.tsv
   drugcomb: data/drugcomb_synergy.tsv
