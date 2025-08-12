@@ -1,201 +1,255 @@
 #!/usr/bin/env python3
 """
-Main pipeline orchestrator for the β-lactam adjuvant discovery system.
+β-lactam adjuvant discovery pipeline - Main orchestrator.
 """
 
 import argparse
-import logging
-import os
+import subprocess
 import sys
 import time
-from pathlib import Path
 import yaml
-import subprocess
-import pandas as pd
-
-def setup_logging(config):
-    """Setup logging configuration."""
-    log_dir = Path(config['logging']['file']).parent
-    log_dir.mkdir(parents=True, exist_ok=True)
-    
-    logging.basicConfig(
-        level=getattr(logging, config['logging']['level']),
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(config['logging']['file']),
-            logging.StreamHandler(sys.stdout)
-        ]
-    )
-    
-    return logging.getLogger(__name__)
+from pathlib import Path
+import logging
 
 def load_config(config_path: str) -> dict:
     """Load configuration from YAML file."""
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
-def run_command(cmd: str, logger: logging.Logger, description: str) -> bool:
-    """Run a shell command and log the result."""
-    logger.info(f"Running: {description}")
-    logger.info(f"Command: {cmd}")
+def setup_logging(config: dict) -> logging.Logger:
+    """Setup logging configuration."""
+    log_level = getattr(logging, config['logging']['level'])
+    log_file = config['logging']['file']
     
-    try:
-        result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
-        logger.info(f"✅ {description} completed successfully")
-        if result.stdout:
-            logger.debug(f"Output: {result.stdout}")
-        return True
-    except subprocess.CalledProcessError as e:
-        logger.error(f"❌ {description} failed with exit code {e.returncode}")
-        logger.error(f"Error output: {e.stderr}")
-        return False
+    # Ensure log directory exists
+    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+    
+    # Configure logging
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    
+    return logging.getLogger(__name__)
 
 def run_data_ingestion(config: dict, logger: logging.Logger) -> bool:
     """Run data ingestion steps."""
     logger.info("Starting data ingestion...")
     
-    # Check if DrugBank data already exists
-    if not Path(config['data_sources']['drugbank_edges']).exists():
-        logger.info("Processing DrugBank database...")
-        cmd = f"python scripts/drugbank_parser.py --xml {config['data_sources']['drugbank']}"
-        if not run_command(cmd, logger, "DrugBank parsing"):
-            return False
-    else:
-        logger.info("DrugBank data already exists, skipping...")
-    
-    # Check if STRING data exists
-    if not Path(config['data_sources']['string']).exists():
-        logger.info("Generating sample STRING interactions...")
-        # For now, we'll use the sample data we created
-        logger.info("Using sample STRING interactions data")
-    else:
-        logger.info("STRING data already exists, skipping...")
-    
-    # Check if ChEMBL data exists
-    if not Path(config['data_sources']['chembl']).exists():
-        logger.info("Generating sample ChEMBL targets...")
-        # For now, we'll use the sample data we created
-        logger.info("Using sample ChEMBL targets data")
-    else:
-        logger.info("ChEMBL data already exists, skipping...")
-    
-    logger.info("Data ingestion completed successfully")
-    return True
+    try:
+        # Parse DrugBank XML
+        logger.info("Parsing DrugBank XML...")
+        result = subprocess.run([
+            'python', 'scripts/drugbank_parser.py',
+            '--xml', config['paths']['drugbank_xml'],
+            '--out-drugs', 'data/drugbank_drugs.tsv',
+            '--out-proteins', 'data/drugbank_proteins.tsv',
+            '--out-edges', 'data/drugbank_edges.tsv'
+        ], capture_output=True, text=True, check=True)
+        logger.info("DrugBank parsing completed")
+        
+        # Fetch STRING interactions
+        logger.info("Fetching STRING interactions...")
+        result = subprocess.run([
+            'python', 'scripts/string_api.py',
+            '--config', config['config_file']
+        ], capture_output=True, text=True, check=True)
+        logger.info("STRING API completed")
+        
+        # Fetch ChEMBL targets
+        logger.info("Fetching ChEMBL targets...")
+        result = subprocess.run([
+            'python', 'scripts/chembl_api.py',
+            '--config', config['config_file']
+        ], capture_output=True, text=True, check=True)
+        logger.info("ChEMBL API completed")
+        
+        # Import DrugComb synergies
+        logger.info("Importing DrugComb synergies...")
+        result = subprocess.run([
+            'python', 'scripts/drugcomb_import.py',
+            '--config', config['config_file']
+        ], capture_output=True, text=True, check=True)
+        logger.info("DrugComb import completed")
+        
+        # Import CARD resistance
+        logger.info("Importing CARD resistance data...")
+        result = subprocess.run([
+            'python', 'scripts/card_import.py',
+            '--config', config['config_file']
+        ], capture_output=True, text=True, check=True)
+        logger.info("CARD import completed")
+        
+        logger.info("Data ingestion completed successfully")
+        return True
+        
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Data ingestion failed: {e}")
+        logger.error(f"stdout: {e.stdout}")
+        logger.error(f"stderr: {e.stderr}")
+        return False
+    except Exception as e:
+        logger.error(f"Data ingestion failed with error: {e}")
+        return False
 
 def run_kg_assembly(config: dict, logger: logging.Logger) -> bool:
     """Run knowledge graph assembly."""
     logger.info("Starting knowledge graph assembly...")
     
-    cmd = f"python scripts/assemble_kg.py --config {config['config_file']}"
-    if not run_command(cmd, logger, "Knowledge graph assembly"):
+    try:
+        result = subprocess.run([
+            'python', 'scripts/assemble_kg.py',
+            '--config', config['config_file']
+        ], capture_output=True, text=True, check=True)
+        
+        logger.info("Knowledge graph assembly completed successfully")
+        return True
+        
+    except subprocess.CalledProcessError as e:
+        logger.error(f"KG assembly failed: {e}")
+        logger.error(f"stdout: {e.stdout}")
+        logger.error(f"stderr: {e.stderr}")
         return False
-    
-    logger.info("Knowledge graph assembly completed successfully")
-    return True
+    except Exception as e:
+        logger.error(f"KG assembly failed with error: {e}")
+        return False
 
 def run_training(config: dict, logger: logging.Logger) -> bool:
-    """Run model training."""
+    """Run model training and evaluation."""
     logger.info("Starting model training...")
     
-    cmd = f"python scripts/train_mini_transe.py --config {config['config_file']} --epochs 50 --embedding-dim 128"
-    if not run_command(cmd, logger, "Model training"):
+    try:
+        result = subprocess.run([
+            'python', 'scripts/train_mini_transe.py',
+            '--config', config['config_file']
+        ], capture_output=True, text=True, check=True)
+        
+        logger.info("Model training completed successfully")
+        return True
+        
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Training failed: {e}")
+        logger.error(f"stdout: {e.stdout}")
+        logger.error(f"stderr: {e.stderr}")
         return False
-    
-    logger.info("Model training completed successfully")
-    return True
+    except Exception as e:
+        logger.error(f"Training failed with error: {e}")
+        return False
 
 def run_prediction(config: dict, logger: logging.Logger) -> bool:
     """Run adjuvant prediction."""
     logger.info("Starting adjuvant prediction...")
     
-    cmd = f"python scripts/predict_links.py --config {config['config_file']} --top-k 100"
-    if not run_command(cmd, logger, "Adjuvant prediction"):
+    try:
+        result = subprocess.run([
+            'python', 'scripts/predict_links.py',
+            '--config', config['config_file']
+        ], capture_output=True, text=True, check=True)
+        
+        logger.info("Adjuvant prediction completed successfully")
+        return True
+        
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Prediction failed: {e}")
+        logger.error(f"stdout: {e.stdout}")
+        logger.error(f"stderr: {e.stderr}")
         return False
-    
-    logger.info("Adjuvant prediction completed successfully")
-    return True
+    except Exception as e:
+        logger.error(f"Prediction failed with error: {e}")
+        return False
 
 def run_validation(config: dict, logger: logging.Logger) -> bool:
     """Run computational validation."""
     logger.info("Starting computational validation...")
     
-    cmd = f"python scripts/validate_predictions.py --config {config['config_file']} --top-k 50"
-    if not run_command(cmd, logger, "Computational validation"):
-        return False
-    
-    logger.info("Computational validation completed successfully")
-    return True
-
-def generate_report(config: dict, logger: logging.Logger) -> bool:
-    """Generate final report and summary."""
-    logger.info("Generating final report...")
-    
-    # Check if all required files exist
-    required_files = [
-        config['outputs']['metrics'],
-        config['outputs']['predictions'],
-        config['outputs']['validation']['summary']
-    ]
-    
-    missing_files = [f for f in required_files if not Path(f).exists()]
-    if missing_files:
-        logger.warning(f"Missing required files: {missing_files}")
-        return False
-    
-    # Load and display results
     try:
-        with open(config['outputs']['metrics'], 'r') as f:
-            metrics = yaml.safe_load(f)
+        result = subprocess.run([
+            'python', 'scripts/validate_predictions.py',
+            '--config', config['config_file']
+        ], capture_output=True, text=True, check=True)
         
-        predictions_df = pd.read_csv(config['outputs']['predictions'], sep='\t')
-        validation_df = pd.read_csv(config['outputs']['validation']['summary'], sep='\t')
-        
-        logger.info("=== FINAL RESULTS SUMMARY ===")
-        logger.info(f"Model Performance:")
-        logger.info(f"  Test MRR: {metrics['test_metrics']['mrr']:.4f}")
-        logger.info(f"  Test Hits@10: {metrics['test_metrics']['hits_at_10']:.4f}")
-        logger.info(f"  Test AUROC: {metrics['test_metrics']['auroc']:.4f}")
-        
-        logger.info(f"Predictions Generated: {len(predictions_df)}")
-        logger.info(f"Validations Completed: {len(validation_df)}")
-        
-        # Show top predictions
-        top_predictions = predictions_df.head(10)
-        logger.info("Top 10 Predicted Adjuvants:")
-        for _, row in top_predictions.iterrows():
-            logger.info(f"  {row['head']} --[{row['relation']}]--> {row['tail']} (score: {row['score']:.4f})")
-        
-        logger.info("Report generation completed successfully")
+        logger.info("Computational validation completed successfully")
         return True
         
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Validation failed: {e}")
+        logger.error(f"stdout: {e.stdout}")
+        logger.error(f"stderr: {e.stderr}")
+        return False
     except Exception as e:
-        logger.error(f"Error generating report: {e}")
+        logger.error(f"Validation failed with error: {e}")
+        return False
+
+def generate_report(config: dict, logger: logging.Logger) -> bool:
+    """Generate final report."""
+    logger.info("Generating final report...")
+    
+    try:
+        # Check artifacts integrity
+        result = subprocess.run([
+            'python', 'scripts/check_artifacts.py',
+            '--config', config['config_file']
+        ], capture_output=True, text=True, check=True)
+        
+        logger.info("Artifact integrity check completed")
+        
+        # Generate summary report
+        report_path = Path(config['paths']['results_dir']) / 'REPORT.md'
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(report_path, 'w') as f:
+            f.write("# β-Lactam Adjuvant Discovery Pipeline Report\n\n")
+            f.write("## Pipeline Summary\n\n")
+            f.write("This report summarizes the execution of the β-lactam adjuvant discovery pipeline.\n\n")
+            f.write("## Artifacts Generated\n\n")
+            f.write("- Knowledge Graph: Drug-protein, drug-drug, and resistance relationships\n")
+            f.write("- Trained TransE Model: Link prediction for adjuvant discovery\n")
+            f.write("- Adjuvant Predictions: Ranked candidates for β-lactam combinations\n")
+            f.write("- Computational Validation: Literature and database evidence\n\n")
+            f.write("## Next Steps\n\n")
+            f.write("1. Review top adjuvant predictions\n")
+            f.write("2. Validate promising candidates experimentally\n")
+            f.write("3. Extend knowledge graph with additional data sources\n")
+            f.write("4. Optimize model hyperparameters\n\n")
+            f.write("## Configuration\n\n")
+            f.write(f"- Config file: {config['config_file']}\n")
+            f.write(f"- Results directory: {config['paths']['results_dir']}\n")
+            f.write(f"- Knowledge graph: {config['paths']['kg_dir']}\n")
+        
+        logger.info(f"Report generated: {report_path}")
+        return True
+        
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Report generation failed: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Report generation failed with error: {e}")
         return False
 
 def main():
     parser = argparse.ArgumentParser(description='β-lactam adjuvant discovery pipeline')
     parser.add_argument('--config', default='config.yaml', help='Path to config file')
     parser.add_argument('--steps', nargs='+', 
-                       choices=['ingest', 'build_kg', 'train', 'predict', 'validate', 'report', 'all'],
-                       default=['all'], help='Pipeline steps to run')
+                        choices=['ingest', 'build_kg', 'train', 'predict', 'validate', 'report', 'all'],
+                        default=['all'], help='Pipeline steps to run')
     parser.add_argument('--skip-existing', action='store_true', 
-                       help='Skip steps if output files already exist')
+                        help='Skip steps if output files already exist')
     
     args = parser.parse_args()
     
-    # Load configuration
     config = load_config(args.config)
     config['config_file'] = args.config
     
-    # Setup logging
     logger = setup_logging(config)
     logger.info("Starting β-lactam adjuvant discovery pipeline")
     logger.info(f"Configuration: {args.config}")
     logger.info(f"Steps: {args.steps}")
     
     start_time = time.time()
-    
-    # Run pipeline steps
     success = True
     
     if 'all' in args.steps or 'ingest' in args.steps:
@@ -222,13 +276,12 @@ def main():
         if not generate_report(config, logger):
             success = False
     
-    # Final summary
     elapsed_time = time.time() - start_time
     if success:
-        logger.info(f"🎉 Pipeline completed successfully in {elapsed_time:.2f} seconds")
+        logger.info(f"Pipeline completed successfully in {elapsed_time:.2f} seconds")
         logger.info("Check the results/ directory for outputs")
     else:
-        logger.error(f"❌ Pipeline failed after {elapsed_time:.2f} seconds")
+        logger.error(f"Pipeline failed after {elapsed_time:.2f} seconds")
         sys.exit(1)
 
 if __name__ == "__main__":

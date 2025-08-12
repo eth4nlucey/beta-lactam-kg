@@ -1,86 +1,244 @@
+#!/usr/bin/env python3
+"""
+Import real drug-drug synergy data from DrugComb database.
+"""
+
+import argparse
 import pandas as pd
 import requests
+import json
+import time
+from pathlib import Path
 import yaml
+from typing import Dict, List, Optional
+import hashlib
 import os
-from typing import List, Tuple, Dict
 
-def load_config(config_path: str = "config.yaml") -> dict:
-    """Load configuration from YAML file"""
+def load_config(config_path: str) -> dict:
+    """Load configuration from YAML file."""
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
-def fetch_drugcomb_synergy(api_key: str = None) -> pd.DataFrame:
-    """
-    Fetch drug synergy data from DrugComb API or use sample data
-    Returns DataFrame with columns: drug1, drug2, synergy_score, cell_line
-    """
-    # For now, create sample synergy data based on known β-lactam adjuvants
-    # In production, this would fetch from DrugComb API
-    
-    sample_synergies = [
-        # Known β-lactam + adjuvant combinations
-        ("amoxicillin", "clavulanic_acid", 0.85, "E. coli"),
-        ("ampicillin", "sulbactam", 0.78, "E. coli"),
-        ("piperacillin", "tazobactam", 0.92, "E. coli"),
-        ("ceftazidime", "avibactam", 0.89, "E. coli"),
-        ("meropenem", "vaborbactam", 0.94, "E. coli"),
-        
-        # Additional potential adjuvants (hypothetical scores)
-        ("amoxicillin", "metformin", 0.65, "E. coli"),
-        ("ampicillin", "aspirin", 0.58, "E. coli"),
-        ("ceftriaxone", "ibuprofen", 0.62, "E. coli"),
-        ("amoxicillin", "vitamin_c", 0.45, "E. coli"),
-        ("ampicillin", "curcumin", 0.52, "E. coli"),
-    ]
-    
-    df = pd.DataFrame(sample_synergies, 
-                     columns=['drug1', 'drug2', 'synergy_score', 'cell_line'])
-    
-    print(f"Generated {len(df)} drug-drug synergy edges")
-    return df
+def get_cache_path(cache_dir: str, query_hash: str) -> str:
+    """Get cache file path for a query."""
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return str(cache_dir / f"{query_hash}.json")
 
-def drugcomb_to_triples(synergy_df: pd.DataFrame, output_path: str) -> None:
-    """Convert DrugComb synergy data to knowledge graph triples"""
+def cache_response(cache_path: str, data: dict):
+    """Cache API response to file."""
+    with open(cache_path, 'w') as f:
+        json.dump(data, f, indent=2)
+
+def load_cached_response(cache_path: str) -> Optional[dict]:
+    """Load cached API response if it exists."""
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'r') as f:
+                return json.load(f)
+        except:
+            pass
+    return None
+
+def fetch_drugcomb_synergy(drug_name: str, cache_dir: str, offline: bool = False) -> Optional[dict]:
+    """
+    Fetch drug synergy data from DrugComb API.
+    """
+    # Create query hash for caching
+    query_hash = hashlib.md5(f"drugcomb_synergy_{drug_name}".encode()).hexdigest()
+    cache_path = get_cache_path(cache_dir, query_hash)
     
-    triples = []
+    # Check cache first
+    if not offline:
+        cached = load_cached_response(cache_path)
+        if cached:
+            print(f"  Using cached data for {drug_name}")
+            return cached
     
-    for _, row in synergy_df.iterrows():
-        drug1, drug2, score, cell_line = row
+    if offline:
+        print(f"  Offline mode: skipping {drug_name}")
+        return None
+    
+    # DrugComb API endpoint (using their public API)
+    # Note: This is a simplified version - in production you'd use their full API
+    url = "https://drugcomb.fimm.fi/api/v1/synergies"
+    
+    # Search parameters
+    params = {
+        'drug_name': drug_name,
+        'limit': 100
+    }
+    
+    try:
+        print(f"  Fetching DrugComb data for {drug_name}...")
+        response = requests.get(url, params=params, timeout=30)
         
-        # Add synergy relationship (bidirectional)
-        triples.append(f"{drug1}\tsynergizes_with\t{drug2}")
-        triples.append(f"{drug2}\tsynergizes_with\t{drug1}")
-        
-        # Add synergy score as attribute (could be used for weighted edges)
-        triples.append(f"{drug1}\tsynergy_score\t{score}")
-        triples.append(f"{drug2}\tsynergy_score\t{score}")
-        
-        # Add cell line context
-        triples.append(f"{drug1}\ttested_in\t{cell_line}")
-        triples.append(f"{drug2}\ttested_in\t{cell_line}")
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Cache the response
+            cache_response(cache_path, data)
+            
+            return data
+        else:
+            print(f"  API error {response.status_code} for {drug_name}")
+            return None
+            
+    except Exception as e:
+        print(f"  Error fetching {drug_name}: {e}")
+        return None
+
+def normalize_drug_name(drug_name: str) -> str:
+    """Normalize drug name for matching."""
+    return drug_name.lower().strip()
+
+def map_drug_to_drugbank(drug_name: str, drugbank_mapping: Dict[str, str]) -> Optional[str]:
+    """Map drug name to DrugBank ID using existing mapping."""
+    normalized = normalize_drug_name(drug_name)
     
-    # Save triples
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, 'w') as f:
-        for triple in triples:
-            f.write(triple + '\n')
+    # Direct match
+    if normalized in drugbank_mapping:
+        return drugbank_mapping[normalized]
     
-    print(f"Saved {len(triples)} DrugComb triples to {output_path}")
+    # Partial matches
+    for db_name, db_id in drugbank_mapping.items():
+        if normalized in db_name or db_name in normalized:
+            return db_id
+    
+    return None
+
+def process_drugcomb_data(drugcomb_data: dict, drugbank_mapping: Dict[str, str]) -> List[Dict]:
+    """
+    Process DrugComb API response and extract synergy relationships.
+    """
+    synergies = []
+    
+    if 'data' not in drugcomb_data:
+        return synergies
+    
+    for item in drugcomb_data['data']:
+        try:
+            # Extract drug names and synergy metrics
+            drug1_name = item.get('drug1_name', '')
+            drug2_name = item.get('drug2_name', '')
+            synergy_score = item.get('synergy_score', 0.0)
+            metric_type = item.get('metric_type', 'unknown')
+            cell_line = item.get('cell_line', 'unknown')
+            record_id = item.get('id', '')
+            
+            # Map to DrugBank IDs
+            drug1_id = map_drug_to_drugbank(drug1_name, drugbank_mapping)
+            drug2_id = map_drug_to_drugbank(drug2_name, drugbank_mapping)
+            
+            if drug1_id and drug2_id:
+                synergy = {
+                    'head_id': drug1_id,
+                    'relation': 'synergizes_with',
+                    'tail_id': drug2_id,
+                    'weight': synergy_score,
+                    'evidence_source': 'DrugComb',
+                    'evidence_id': f"DC:{record_id}",
+                    'metric_type': metric_type,
+                    'cell_line': cell_line
+                }
+                synergies.append(synergy)
+                
+        except Exception as e:
+            print(f"  Error processing DrugComb item: {e}")
+            continue
+    
+    return synergies
 
 def main():
-    """Main function to run DrugComb import"""
-    config = load_config()
+    parser = argparse.ArgumentParser(description='Import real DrugComb synergy data')
+    parser.add_argument('--config', default='config.yaml', help='Path to config file')
+    parser.add_argument('--offline', action='store_true', help='Use cached data only')
+    parser.add_argument('--output', help='Output file path')
     
-    print("Importing DrugComb drug-drug synergy data...")
+    args = parser.parse_args()
     
-    # Fetch synergy data
-    synergy_df = fetch_drugcomb_synergy()
+    # Load configuration
+    config = load_config(args.config)
     
-    # Convert to triples
-    output_path = config['data_sources']['drugcomb']
-    drugcomb_to_triples(synergy_df, output_path)
+    # Get paths
+    cache_dir = config['paths']['cache_dir']
+    output_path = args.output or config['data_sources']['drugcomb']
     
-    print("DrugComb import completed successfully!")
+    # Load existing DrugBank mapping
+    drugbank_mapping_path = 'data/drugbank_drugs.tsv'
+    if not Path(drugbank_mapping_path).exists():
+        print(f"❌ DrugBank mapping not found: {drugbank_mapping_path}")
+        print("Please run DrugBank parser first")
+        return
+    
+    drugbank_df = pd.read_csv(drugbank_mapping_path, sep='\t')
+    drugbank_mapping = dict(zip(drugbank_df['name'].str.lower(), drugbank_df['drugbank_id']))
+    
+    print(f"✅ Loaded {len(drugbank_mapping)} DrugBank drug mappings")
+    
+    # Define β-lactam antibiotics to search for
+    beta_lactams = [
+        "amoxicillin", "ampicillin", "ceftriaxone", "ceftazidime", 
+        "meropenem", "piperacillin", "cephalexin", "cefazolin",
+        "cefuroxime", "cefotaxime", "cefepime", "ertapenem",
+        "clavulanic acid", "sulbactam", "tazobactam", "avibactam"
+    ]
+    
+    print(f"🔍 Searching DrugComb for {len(beta_lactams)} β-lactam antibiotics...")
+    
+    all_synergies = []
+    
+    for drug in beta_lactams:
+        print(f"Processing {drug}...")
+        
+        # Fetch DrugComb data
+        drugcomb_data = fetch_drugcomb_synergy(drug, cache_dir, args.offline)
+        
+        if drugcomb_data:
+            # Process the data
+            synergies = process_drugcomb_data(drugcomb_data, drugbank_mapping)
+            all_synergies.extend(synergies)
+            print(f"  Found {len(synergies)} synergy relationships")
+        else:
+            print(f"  No data found")
+        
+        # Rate limiting
+        if not args.offline:
+            time.sleep(1)
+    
+    # Create output DataFrame
+    if all_synergies:
+        df = pd.DataFrame(all_synergies)
+        
+        # Ensure output directory exists
+        output_dir = Path(output_path).parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save to TSV
+        df.to_csv(output_path, sep='\t', index=False)
+        
+        print(f"\n✅ Saved {len(df)} DrugComb synergy relationships to {output_path}")
+        print(f"   Unique drugs: {df['head_id'].nunique()}")
+        print(f"   Synergy relationships: {len(df)}")
+        
+        # Show sample
+        print("\n📊 Sample synergies:")
+        for _, row in df.head(5).iterrows():
+            print(f"   {row['head_id']} synergizes_with {row['tail_id']} (score: {row['weight']:.3f})")
+    
+    else:
+        print("\n⚠️  No DrugComb synergies found")
+        
+        # Create empty file with correct schema
+        empty_df = pd.DataFrame(columns=[
+            'head_id', 'relation', 'tail_id', 'weight', 
+            'evidence_source', 'evidence_id', 'metric_type', 'cell_line'
+        ])
+        
+        output_dir = Path(output_path).parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+        empty_df.to_csv(output_path, sep='\t', index=False)
+        print(f"Created empty file with schema: {output_path}")
 
 if __name__ == "__main__":
     main()

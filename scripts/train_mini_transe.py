@@ -216,101 +216,152 @@ def train_model(model: TransE, train_triples: List[Tuple[int, int, int]],
         'valid_scores': valid_scores
     }
 
-def evaluate_model(model: TransE, triples: List[Tuple[int, int, int]], 
-                  split_name: str = 'test') -> Dict:
-    """Evaluate model performance"""
+def evaluate_model(model, test_triples, all_triples, entity_mapping, relation_mapping, k_list=[1, 3, 10]):
+    """
+    Evaluate model with filtered metrics (ignore other true tails when ranking).
+    """
+    model.eval()
     
-    print(f"Evaluating on {split_name} set...")
+    print("Evaluating model with filtered metrics...")
+    
+    # Create set of all true triples for filtering
+    all_true_triples = set()
+    for _, row in all_triples.iterrows():
+        head = entity_mapping.get(row['head'], row['head'])
+        rel = relation_mapping.get(row['relation'], row['relation'])
+        tail = entity_mapping.get(row['tail'], row['tail'])
+        all_true_triples.add((head, rel, tail))
+    
+    # Convert test triples to tensors
+    test_heads = torch.tensor([entity_mapping.get(row['head'], row['head']) for _, row in test_triples.iterrows()], dtype=torch.long)
+    test_rels = torch.tensor([relation_mapping.get(row['relation'], row['relation']) for _, row in test_triples.iterrows()], dtype=torch.long)
+    test_tails = torch.tensor([entity_mapping.get(row['tail'], row['tail']) for _, row in test_triples.iterrows()], dtype=torch.long)
+    
+    num_entities = len(entity_mapping)
+    num_relations = len(relation_mapping)
+    
+    mrr_scores = []
+    hits_at_k = {k: 0 for k in k_list}
+    
+    print(f"Evaluating {len(test_triples)} test triples...")
+    
+    for i in range(len(test_triples)):
+        if i % 100 == 0:
+            print(f"  Progress: {i}/{len(test_triples)}")
+        
+        head = test_heads[i]
+        rel = test_rels[i]
+        tail = test_tails[i]
+        
+        # Score all possible tails for this (head, relation) pair
+        head_tensor = head.unsqueeze(0).expand(num_entities, -1)
+        rel_tensor = rel.unsqueeze(0).expand(num_entities, -1)
+        tail_candidates = torch.arange(num_entities)
+        
+        with torch.no_grad():
+            scores = model.forward(head_tensor, rel_tensor, tail_candidates)
+        
+        # Filter out other true tails for this (head, relation) pair
+        filtered_scores = scores.clone()
+        for j in range(num_entities):
+            if (head.item(), rel.item(), j) in all_true_triples and j != tail.item():
+                filtered_scores[j] = float('-inf')  # Set to lowest possible score
+        
+        # Sort by score (descending)
+        sorted_scores, sorted_indices = torch.sort(filtered_scores, descending=True)
+        
+        # Find rank of true tail
+        true_rank = (sorted_indices == tail).nonzero(as_tuple=True)[0].item() + 1
+        
+        # Calculate MRR
+        mrr_scores.append(1.0 / true_rank)
+        
+        # Calculate Hits@K
+        for k in k_list:
+            if true_rank <= k:
+                hits_at_k[k] += 1
+    
+    # Calculate final metrics
+    mrr = np.mean(mrr_scores)
+    hits_at_k_normalized = {k: hits_at_k[k] / len(test_triples) for k in k_list}
+    
+    print(f"  MRR: {mrr:.4f}")
+    for k in k_list:
+        print(f"  Hits@{k}: {hits_at_k_normalized[k]:.4f}")
+    
+    return {
+        'mrr': mrr,
+        'hits_at_k': hits_at_k_normalized,
+        'mrr_scores': mrr_scores
+    }
+
+def calculate_auroc(model, test_triples, all_triples, entity_mapping, relation_mapping, negatives_per_pos=1):
+    """
+    Calculate AUROC by scoring positive vs corrupted negative triples.
+    """
+    print("Calculating AUROC...")
     
     model.eval()
     
-    # Metrics
-    mrr_scores = []
-    hits_at_1 = []
-    hits_at_3 = []
-    hits_at_10 = []
+    # Create set of all true triples for filtering
+    all_true_triples = set()
+    for _, row in all_triples.iterrows():
+        head = entity_mapping.get(row['head'], row['head'])
+        rel = relation_mapping.get(row['relation'], row['relation'])
+        tail = entity_mapping.get(row['tail'], row['tail'])
+        all_true_triples.add((head, rel, tail))
     
-    # For AUROC calculation
+    # Convert test triples to tensors
+    test_heads = torch.tensor([entity_mapping.get(row['head'], row['head']) for _, row in test_triples.iterrows()], dtype=torch.long)
+    test_rels = torch.tensor([relation_mapping.get(row['relation'], row['relation']) for _, row in test_triples.iterrows()], dtype=torch.long)
+    test_tails = torch.tensor([entity_mapping.get(row['tail'], row['tail']) for _, row in test_triples.iterrows()], dtype=torch.long)
+    
+    num_entities = len(entity_mapping)
+    
+    # Score positive triples
     positive_scores = []
-    negative_scores = []
-    
     with torch.no_grad():
-        for h, r, t in triples:
-            # Score the positive triple
-            pos_score = model.score_triple(h, r, t)
-            positive_scores.append(pos_score)
+        for i in range(len(test_triples)):
+            head = test_heads[i]
+            rel = test_rels[i]
+            tail = test_tails[i]
             
-            # Score all possible tails
-            all_scores = []
-            for t_candidate in range(model.num_entities):
-                score = model.score_triple(h, r, t_candidate)
-                all_scores.append((t_candidate, score))
-            
-            # Sort by score (descending)
-            all_scores.sort(key=lambda x: x[1], reverse=True)
-            
-            # Find rank of true tail
-            true_rank = None
-            for rank, (t_candidate, _) in enumerate(all_scores):
-                if t_candidate == t:
-                    true_rank = rank + 1
-                    break
-            
-            if true_rank is not None:
-                # MRR
-                mrr = 1.0 / true_rank
-                mrr_scores.append(mrr)
-                
-                # Hits@K
-                hits_at_1.append(1.0 if true_rank <= 1 else 0.0)
-                hits_at_3.append(1.0 if true_rank <= 3 else 0.0)
-                hits_at_10.append(1.0 if true_rank <= 10 else 0.0)
-                
-                # Sample negative scores for AUROC
-                for _ in range(5):  # Sample 5 negatives
-                    t_neg = random.randint(0, model.num_entities - 1)
-                    if t_neg != t:
-                        neg_score = model.score_triple(h, r, t_neg)
-                        negative_scores.append(neg_score)
+            score = model.forward(head.unsqueeze(0), rel.unsqueeze(0), tail.unsqueeze(0))
+            positive_scores.append(score.item())
     
-    # Calculate metrics
-    mrr = np.mean(mrr_scores) if mrr_scores else 0.0
-    hits_1 = np.mean(hits_at_1) if hits_at_1 else 0.0
-    hits_3 = np.mean(hits_at_3) if hits_at_3 else 0.0
-    hits_10 = np.mean(hits_at_10) if hits_at_10 else 0.0
+    # Generate and score negative triples
+    negative_scores = []
+    for i in range(len(test_triples)):
+        head = test_heads[i]
+        rel = test_rels[i]
+        
+        for _ in range(negatives_per_pos):
+            # Corrupt tail
+            corrupted_tail = torch.randint(0, num_entities, (1,))
+            while (head.item(), rel.item(), corrupted_tail.item()) in all_true_triples:
+                corrupted_tail = torch.randint(0, num_entities, (1,))
+            
+            with torch.no_grad():
+                score = model.forward(head.unsqueeze(0), rel.unsqueeze(0), corrupted_tail)
+                negative_scores.append(score.item())
+    
+    # Combine scores and labels
+    all_scores = positive_scores + negative_scores
+    all_labels = [1] * len(positive_scores) + [0] * len(negative_scores)
     
     # Calculate AUROC
-    auroc = 0.5
-    if positive_scores and negative_scores:
-        y_true = [1] * len(positive_scores) + [0] * len(negative_scores)
-        y_scores = positive_scores + negative_scores
-        
-        try:
-            auroc = roc_auc_score(y_true, y_scores)
-        except ValueError:
-            auroc = 0.5
+    from sklearn.metrics import roc_auc_score
+    auroc = roc_auc_score(all_labels, all_scores)
     
-    metrics = {
-        'mrr': mrr,
-        'hits_at_1': hits_1,
-        'hits_at_3': hits_3,
-        'hits_at_10': hits_10,
-        'auroc': auroc,
-        'num_triples': len(triples)
-    }
-    
-    print(f"{split_name.capitalize()} Metrics:")
-    print(f"  MRR: {mrr:.4f}")
-    print(f"  Hits@1: {hits_1:.4f}")
-    print(f"  Hits@3: {hits_3:.4f}")
-    print(f"  Hits@10: {hits_10:.4f}")
     print(f"  AUROC: {auroc:.4f}")
+    print(f"  Positive samples: {len(positive_scores)}")
+    print(f"  Negative samples: {len(negative_scores)}")
     
-    return metrics
+    return auroc
 
 def save_model_and_mappings(model, entity_mapping, relation_mapping, config):
     """Save the trained model and mappings."""
-    output_dir = Path(config['outputs']['model_dir'])
+    output_dir = Path(config['paths']['results_dir']) / 'trained_model'
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Save model
@@ -327,19 +378,31 @@ def save_model_and_mappings(model, entity_mapping, relation_mapping, config):
     with open(mappings_path, 'wb') as f:
         pickle.dump(mappings, f, protocol=pickle.HIGHEST_PROTOCOL)
     
+    # Save entity and relation mappings as JSON for easy access
+    entity_json = {k: v for k, v in entity_mapping.items()}
+    relation_json = {k: v for k, v in relation_mapping.items()}
+    
+    with open(output_dir / 'entity2id.json', 'w') as f:
+        json.dump(entity_json, f, indent=2)
+    
+    with open(output_dir / 'relation2id.json', 'w') as f:
+        json.dump(relation_json, f, indent=2)
+    
     print(f"Model saved to {model_path}")
     print(f"Mappings saved to {mappings_path}")
+    print(f"Entity mapping saved to {output_dir / 'entity2id.json'}")
+    print(f"Relation mapping saved to {output_dir / 'relation2id.json'}")
 
 def main():
     """Main training function"""
     
     parser = argparse.ArgumentParser(description='Train TransE model on knowledge graph')
     parser.add_argument('--config', default='config.yaml', help='Path to config file')
-    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--embedding-dim', type=int, default=128, help='Embedding dimension')
-    parser.add_argument('--batch-size', type=int, default=1024, help='Batch size for training')
-    parser.add_argument('--learning-rate', type=float, default=0.001, help='Learning rate')
-    parser.add_argument('--margin', type=float, default=1.0, help='Margin for loss function')
+    parser.add_argument('--epochs', type=int, help='Number of training epochs (overrides config)')
+    parser.add_argument('--embedding-dim', type=int, help='Embedding dimension (overrides config)')
+    parser.add_argument('--batch-size', type=int, help='Batch size for training (overrides config)')
+    parser.add_argument('--learning-rate', type=float, help='Learning rate (overrides config)')
+    parser.add_argument('--margin', type=float, help='Margin for loss function (overrides config)')
     
     args = parser.parse_args()
     
@@ -357,9 +420,9 @@ def main():
     
     # Load data
     data_loader = KGDataLoader(
-        edges_file=config['kg']['edges'],
-        nodes_file=config['kg']['nodes'],
-        relations_file=os.path.join(os.path.dirname(config['kg']['edges']), 'relations.tsv')
+        edges_file=config['paths']['kg_dir'] + '/edges.tsv',
+        nodes_file=config['paths']['kg_dir'] + '/entities.tsv',
+        relations_file=config['paths']['kg_dir'] + '/relations.tsv'
     )
     
     # Split data
@@ -371,8 +434,8 @@ def main():
     model = TransE(
         num_entities=len(data_loader.entity_id_map),
         num_relations=len(data_loader.relation_id_map),
-        embedding_dim=args.embedding_dim,
-        margin=args.margin
+        embedding_dim=args.embedding_dim or config['train']['dim'],
+        margin=args.margin or 1.0
     )
     
     print(f"Model initialized with {len(data_loader.entity_id_map)} entities and {len(data_loader.relation_id_map)} relations")
@@ -382,40 +445,65 @@ def main():
         model=model,
         train_triples=train_triples,
         valid_triples=valid_triples,
-        num_epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate
+        num_epochs=args.epochs or config['train']['epochs'],
+        batch_size=args.batch_size or config['train']['batch_size'],
+        learning_rate=args.learning_rate or config['train']['lr']
     )
     
-    # Evaluate on test set
-    test_metrics = evaluate_model(model, test_triples, 'test')
+    # Evaluate on test set with filtered metrics
+    test_metrics = evaluate_model(
+        model, test_triples, 
+        pd.concat([train_triples, valid_triples, test_triples]),  # all triples for filtering
+        data_loader.entity_id_map, 
+        data_loader.relation_id_map,
+        k_list=config['eval']['k_list']
+    )
+    
+    # Calculate AUROC
+    auroc = calculate_auroc(
+        model, test_triples,
+        pd.concat([train_triples, valid_triples, test_triples]),
+        data_loader.entity_id_map,
+        data_loader.relation_id_map,
+        negatives_per_pos=config['eval']['negatives_per_pos']
+    )
+    
+    # Add AUROC to test metrics
+    test_metrics['auroc'] = auroc
     
     # Save results
     results = {
         'training_history': training_history,
         'test_metrics': test_metrics,
         'model_config': {
-            'embedding_dim': args.embedding_dim,
-            'num_epochs': args.epochs,
-            'batch_size': args.batch_size,
-            'learning_rate': args.learning_rate,
-            'margin': args.margin
+            'embedding_dim': args.embedding_dim or config['train']['dim'],
+            'num_epochs': args.epochs or config['train']['epochs'],
+            'batch_size': args.batch_size or config['train']['batch_size'],
+            'learning_rate': args.learning_rate or config['train']['lr'],
+            'margin': args.margin or 1.0
+        },
+        'data_stats': {
+            'num_entities': len(data_loader.entity_id_map),
+            'num_relations': len(data_loader.relation_id_map),
+            'train_size': len(train_triples),
+            'valid_size': len(valid_triples),
+            'test_size': len(test_triples)
         }
     }
     
     # Save metrics
-    metrics_path = config['outputs']['metrics']
-    os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+    metrics_path = Path(config['paths']['results_dir']) / 'metrics.json'
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
     
     with open(metrics_path, 'w') as f:
         json.dump(results, f, indent=2)
     
-    print(f"Results saved to {metrics_path}")
+    print(f"Metrics saved to {metrics_path}")
     
-    # Save model
+    # Save model and mappings
     save_model_and_mappings(model, data_loader.entity_id_map, data_loader.relation_id_map, config)
     
-    print("\nTraining completed successfully!")
+    print("Training completed successfully!")
 
 if __name__ == "__main__":
     main()

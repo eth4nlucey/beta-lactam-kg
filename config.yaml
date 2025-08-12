@@ -1,34 +1,37 @@
 # Beta-Lactam Knowledge Graph Configuration
-organism: 511145  # E. coli K12
+paths:
+  drugbank_xml: data/drugbank/full-database.xml
+  kg_dir: data/kg
+  results_dir: results
+  cache_dir: .cache
 
-# Knowledge Graph Schema
-kg:
-  nodes: data/kg/nodes.tsv
-  edges: data/kg/edges.tsv
-  relations: ["drug-target", "ppi", "drug-drug", "drug-resistance", "drug-bacteria"]
-  
+train:
+  model: mini_transe
+  dim: 128
+  epochs: 100
+  lr: 0.001
+  batch_size: 1024
+
+eval:
+  k_list: [1, 3, 10]
+  negatives_per_pos: 1
+
+validation:
+  top_k: 100
+  europe_pmc_page_size: 25
+  rate_limit_s: 0.5
+
+organism:
+  string_species_id: 511145  # E. coli K-12
+
 # Data Sources
 data_sources:
-  drugbank: data/drugbank/full-database.xml
-  drugbank_edges: data/drugbank_edges.tsv
+  drugbank: data/drugbank_edges.tsv
   string: data/string_interactions.tsv
   chembl: data/chembl_targets.tsv
-  drugcomb: data/drugcomb_synergy.tsv
-  card: data/card_resistance.tsv
-  
-# Training Configuration
-training:
-  model: TransE
-  embedding_dim: 64
-  epochs: 200
-  valid_ratio: 0.1
-  test_ratio: 0.1
-  random_seed: 42
-  
-# Evaluation Metrics
-eval:
-  k_list: [10, 50, 100]
-  
+  drugcomb: data/kg/drugcomb_edges.tsv
+  card: data/kg/card_edges.tsv
+
 # Output Paths
 outputs:
   model_dir: results/trained_model/
@@ -38,7 +41,7 @@ outputs:
     europe_pmc: results/validation/epmc_hits.tsv
     drugcomb: results/validation/drugcomb_hits.tsv
     summary: results/validation/validation_summary.tsv
-    
+
 # Logging
 logging:
   level: INFO
