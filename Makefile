@@ -1,6 +1,6 @@
 # β-Lactam Adjuvant Discovery Pipeline Makefile
 
-.PHONY: help run clean ingest kg train predict validate report check
+.PHONY: help run clean ingest kg train predict validate report check dashboard
 
 help:
 	@echo "β-Lactam Adjuvant Discovery Pipeline"
@@ -14,6 +14,7 @@ help:
 	@echo "  validate   - Validate predictions computationally"
 	@echo "  report     - Generate final report and check artifacts"
 	@echo "  check      - Check integrity of all pipeline artifacts"
+	@echo "  dashboard  - Start the Next.js dashboard frontend"
 	@echo "  clean      - Clean generated files and results"
 	@echo "  help       - Show this help message"
 
@@ -40,6 +41,14 @@ report:
 
 check:
 	python scripts/check_artifacts.py --config config.yaml
+
+dashboard:
+	@echo "Starting Next.js dashboard..."
+	@echo "Make sure you have the FastAPI backend running in another terminal:"
+	@echo "  cd api && uvicorn app:app --reload --port 8000"
+	@echo ""
+	@echo "Starting frontend..."
+	cd apps/dashboard && npm run dev
 
 clean:
 	rm -rf results/
