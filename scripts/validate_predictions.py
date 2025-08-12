@@ -1,149 +1,146 @@
+#!/usr/bin/env python3
+"""
+Validate predicted adjuvant candidates against Europe PMC literature and DrugComb database.
+"""
+
+import argparse
 import pandas as pd
 import requests
-import yaml
-import json
-import os
-from typing import List, Tuple, Dict
 import time
+import json
+from pathlib import Path
+import yaml
+from typing import Dict, List, Tuple
 
-def load_config(config_path: str = "config.yaml") -> dict:
-    """Load configuration from YAML file"""
+def load_config(config_path: str) -> dict:
+    """Load configuration from YAML file."""
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
-def search_europe_pmc(drug1: str, drug2: str, max_results: int = 10) -> Dict:
-    """Search Europe PMC for literature evidence of drug combination"""
+def search_europe_pmc(drug: str, adjuvant: str) -> Dict:
+    """
+    Search Europe PMC for literature evidence of drug-adjuvant combinations.
+    """
+    # Create search query for synergy/adjuvant effects
+    query = f'"{drug}" AND "{adjuvant}" AND (synergy OR potentiation OR adjuvant OR "drug combination")'
     
-    # Construct search query
-    query = f'"{drug1}" AND "{drug2}" AND (synergy OR potentiation OR adjuvant OR combination)'
-    
-    # Europe PMC API endpoint
+    # Europe PMC REST API
     url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
     params = {
-        "query": query,
-        "format": "json",
-        "resultType": "core",
-        "pageSize": max_results
+        'query': query,
+        'format': 'json',
+        'pageSize': 25,
+        'resultType': 'core'
     }
     
     try:
         response = requests.get(url, params=params, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            
-            # Extract results
-            results = {
-                'hit_count': data.get('hitCount', 0),
-                'pmids': [],
-                'titles': [],
-                'abstracts': []
-            }
-            
-            for article in data.get('resultList', {}).get('result', []):
-                pmid = article.get('pmid', '')
-                if pmid:
-                    results['pmids'].append(pmid)
-                    results['titles'].append(article.get('title', ''))
-                    results['abstracts'].append(article.get('abstractText', ''))
-            
-            return results
-        else:
-                    print(f"Europe PMC API error: {response.status_code}")
-        return {'hit_count': 0, 'pmids': [], 'titles': [], 'abstracts': []}
-            
+        response.raise_for_status()
+        
+        data = response.json()
+        hit_count = data.get('hitCount', 0)
+        
+        # Extract PMIDs from results
+        pmids = []
+        if 'resultList' in data and 'result' in data['resultList']:
+            for result in data['resultList']['result']:
+                if 'pmid' in result:
+                    pmids.append(str(result['pmid']))
+        
+        return {
+            'hit_count': hit_count,
+            'pmids': pmids[:5],  # Top 5 PMIDs
+            'query': query
+        }
+        
     except Exception as e:
-        print(f"Europe PMC search failed: {e}")
-        return {'hit_count': 0, 'pmids': [], 'titles': [], 'abstracts': []}
+        print(f"Error searching Europe PMC for {drug}-{adjuvant}: {e}")
+        return {
+            'hit_count': 0,
+            'pmids': [],
+            'query': query,
+            'error': str(e)
+        }
 
-def check_drugcomb_synergy(drug1: str, drug2: str) -> Dict:
-    """Check if drug combination exists in DrugComb data"""
-    
-    # Load DrugComb data
-    config = load_config()
-    drugcomb_path = config['data_sources']['drugcomb']
-    
-    if not os.path.exists(drugcomb_path):
-        return {'found': False, 'synergy_score': None, 'cell_line': None}
-    
+def check_drugcomb_synergy(drug: str, adjuvant: str) -> Dict:
+    """
+    Check DrugComb database for existing synergy data.
+    For now, we'll use our sample data, but this can be extended to use the real DrugComb API.
+    """
+    # Load our DrugComb sample data
     try:
-        drugcomb_df = pd.read_csv(drugcomb_path, sep='\t', names=['head', 'relation', 'tail'])
+        drugcomb_data = pd.read_csv('data/drugcomb_synergy.tsv', sep='\t')
         
-        # Look for synergy relationship
-        synergy_mask = (
-            ((drugcomb_df['head'] == drug1) & (drugcomb_df['tail'] == drug2)) |
-            ((drugcomb_df['head'] == drug2) & (drugcomb_df['tail'] == drug1))
-        ) & (drugcomb_df['relation'] == 'synergizes_with')
+        # Check if the drug-adjuvant pair exists
+        # Note: We need to handle different naming conventions
+        found = False
+        synergy_score = None
+        cell_line = None
         
-        if synergy_mask.any():
-            # Get synergy score if available
-            score_mask = (
-                ((drugcomb_df['head'] == drug1) | (drugcomb_df['head'] == drug2)) &
-                (drugcomb_df['relation'] == 'synergy_score')
-            )
-            
-            synergy_score = None
-            if score_mask.any():
-                synergy_score = drugcomb_df.loc[score_mask, 'tail'].iloc[0]
-            
-            # Get cell line info
-            cell_line = None
-            cell_mask = (
-                ((drugcomb_df['head'] == drug1) | (drugcomb_df['head'] == drug2)) &
-                (drugcomb_df['relation'] == 'tested_in')
-            )
-            if cell_mask.any():
-                cell_line = drugcomb_df.loc[cell_mask, 'tail'].iloc[0]
-            
-            return {
-                'found': True,
-                'synergy_score': synergy_score,
-                'cell_line': cell_line
-            }
-        else:
-            return {'found': False, 'synergy_score': None, 'cell_line': None}
-            
+        # Check both directions (drug1-drug2 and drug2-drug1)
+        for _, row in drugcomb_data.iterrows():
+            if ((row['drug1'].lower() == drug.lower() and row['drug2'].lower() == adjuvant.lower()) or
+                (row['drug2'].lower() == drug.lower() and row['drug1'].lower() == adjuvant.lower())):
+                found = True
+                synergy_score = row['synergy_score']
+                cell_line = row['cell_line']
+                break
+        
+        return {
+            'found': found,
+            'synergy_score': synergy_score,
+            'cell_line': cell_line
+        }
+        
     except Exception as e:
-        print(f"⚠️ DrugComb check failed: {e}")
-        return {'found': False, 'synergy_score': None, 'cell_line': None}
+        print(f"Error checking DrugComb for {drug}-{adjuvant}: {e}")
+        return {
+            'found': False,
+            'synergy_score': None,
+            'cell_line': None,
+            'error': str(e)
+        }
 
-def validate_predictions(config_path: str = "config.yaml", top_k: int = 100):
-    """Validate top predictions using Europe PMC and DrugComb"""
-    
-    config = load_config(config_path)
-    
+def validate_predictions(config: dict, top_k: int = 100) -> pd.DataFrame:
+    """
+    Validate top predicted adjuvant candidates against literature and databases.
+    """
     # Load predictions
     predictions_path = config['outputs']['predictions']
-    if not os.path.exists(predictions_path):
-        print(f"❌ Predictions file not found: {predictions_path}")
-        return
+    if not Path(predictions_path).exists():
+        print(f"Predictions file not found: {predictions_path}")
+        return pd.DataFrame()
     
     predictions_df = pd.read_csv(predictions_path, sep='\t')
-    print(f"📊 Validating top {min(top_k, len(predictions_df))} predictions...")
+    print(f"Loaded {len(predictions_df)} predictions")
     
-    # Initialize validation results
+    # Take top K predictions
+    top_predictions = predictions_df.head(top_k)
+    
     validation_results = []
     
-    # Process top predictions
-    for idx, row in predictions_df.head(top_k).iterrows():
+    print(f"Validating top {len(top_predictions)} predictions...")
+    
+    for idx, row in top_predictions.iterrows():
         drug = row['head']
         adjuvant = row['tail']
         score = row['score']
         
-        print(f"🔍 Validating: {drug} + {adjuvant} (score: {score:.4f})")
+        print(f"Validating {idx+1}/{len(top_predictions)}: {drug} + {adjuvant}")
         
-        # Europe PMC validation
+        # Search Europe PMC
         epmc_results = search_europe_pmc(drug, adjuvant)
         
-        # DrugComb validation
+        # Check DrugComb
         drugcomb_results = check_drugcomb_synergy(drug, adjuvant)
         
-        # Store results
+        # Compile validation result
         validation_result = {
             'drug': drug,
             'adjuvant': adjuvant,
             'prediction_score': score,
             'epmc_hit_count': epmc_results['hit_count'],
-            'epmc_top_pmids': ';'.join(epmc_results['pmids'][:3]),  # Top 3 PMIDs
+            'epmc_top_pmids': ';'.join(epmc_results['pmids'][:3]),
             'drugcomb_found': drugcomb_results['found'],
             'drugcomb_synergy_score': drugcomb_results['synergy_score'],
             'drugcomb_cell_line': drugcomb_results['cell_line']
@@ -151,52 +148,57 @@ def validate_predictions(config_path: str = "config.yaml", top_k: int = 100):
         
         validation_results.append(validation_result)
         
-        # Rate limiting for API calls
+        # Rate limiting for Europe PMC
         time.sleep(0.5)
     
-    # Convert to DataFrame
+    # Create validation summary
     validation_df = pd.DataFrame(validation_results)
     
     # Save validation results
-    os.makedirs(os.path.dirname(config['outputs']['validation']['summary']), exist_ok=True)
+    output_dir = Path(config['outputs']['validation']['summary']).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Save detailed results
     validation_df.to_csv(config['outputs']['validation']['summary'], sep='\t', index=False)
-    print(f"✅ Validation summary saved to {config['outputs']['validation']['summary']}")
+    
+    print(f"Validation completed. Results saved to {config['outputs']['validation']['summary']}")
     
     # Print summary statistics
-    print("\n📊 Validation Summary:")
-    print(f"  Total predictions validated: {len(validation_df)}")
-    print(f"  Europe PMC hits: {validation_df['epmc_hit_count'].sum()}")
-    print(f"  DrugComb found: {validation_df['drugcomb_found'].sum()}")
+    print("\nValidation Summary:")
+    print(f"Total predictions validated: {len(validation_df)}")
+    print(f"Europe PMC hits: {validation_df['epmc_hit_count'].sum()}")
+    print(f"DrugComb matches: {validation_df['drugcomb_found'].sum()}")
     
-    # Top validated predictions
-    top_validated = validation_df[
-        (validation_df['epmc_hit_count'] > 0) | 
-        (validation_df['drugcomb_found'])
-    ].sort_values('prediction_score', ascending=False)
-    
-    if len(top_validated) > 0:
-        print(f"\n🏆 Top validated predictions:")
-        for _, row in top_validated.head(5).iterrows():
-            print(f"  {row['drug']} + {row['adjuvant']}: Score={row['prediction_score']:.4f}, "
-                  f"EPMC={row['epmc_hit_count']}, DrugComb={row['drugcomb_found']}")
+    # Show top hits
+    print("\nTop 5 literature-supported predictions:")
+    top_hits = validation_df.nlargest(5, 'epmc_hit_count')
+    for _, hit in top_hits.iterrows():
+        print(f"  {hit['drug']} + {hit['adjuvant']}: {hit['epmc_hit_count']} PMIDs")
     
     return validation_df
 
 def main():
-    """Main function to run validation"""
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='Validate predictions using Europe PMC and DrugComb')
-    parser.add_argument('--config', default='config.yaml', help='Configuration file path')
-    parser.add_argument('--top_k', type=int, default=100, help='Number of top predictions to validate')
+    parser = argparse.ArgumentParser(description='Validate predicted adjuvant candidates')
+    parser.add_argument('--config', default='config.yaml', help='Path to config file')
+    parser.add_argument('--top-k', type=int, default=100, help='Number of top predictions to validate')
+    parser.add_argument('--output', help='Output file path (optional)')
     
     args = parser.parse_args()
     
-    print("🔬 Starting computational validation of predictions...")
-    validation_results = validate_predictions(args.config, args.top_k)
-    print("✅ Validation completed successfully!")
+    # Load configuration
+    config = load_config(args.config)
+    
+    # Override output path if specified
+    if args.output:
+        config['outputs']['validation']['summary'] = args.output
+    
+    # Run validation
+    validation_results = validate_predictions(config, args.top_k)
+    
+    if not validation_results.empty:
+        print(f"\nValidation completed successfully!")
+        print(f"Results saved to: {config['outputs']['validation']['summary']}")
+    else:
+        print("Validation failed - no results generated")
 
 if __name__ == "__main__":
     main()

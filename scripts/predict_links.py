@@ -50,44 +50,90 @@ def load_trained_model_and_mappings(model_path: str, mappings_path: str):
     
     return model, mappings['entity_mapping'], mappings['relation_mapping']
 
+def load_entity_mapping_from_tsv(mapping_path: str) -> Dict[str, int]:
+    """Load entity ID mapping from TSV file."""
+    df = pd.read_csv(mapping_path, sep='\t')
+    # Use original_name as key and normalized_id as value
+    return dict(zip(df['original_name'], df['normalized_id']))
+
+def load_relation_mapping_from_tsv(relations_path: str) -> Dict[str, int]:
+    """Load relation ID mapping from TSV file."""
+    df = pd.read_csv(relations_path, sep='\t')
+    # Use relation_name as key and relation_id as value
+    return dict(zip(df['relation_name'], df['relation_id']))
+
+def create_reverse_mapping(entity_mapping: Dict[str, int]) -> Dict[str, str]:
+    """Create a mapping from DrugBank IDs to normalized IDs."""
+    # Load the TSV to get the reverse mapping
+    df = pd.read_csv('data/kg/entity_mapping.tsv', sep='\t')
+    return dict(zip(df['original_name'], df['normalized_id']))
+
+def create_relation_name_mapping(relation_mapping: Dict[str, int]) -> Dict[str, int]:
+    """Create a mapping from relation names to relation IDs."""
+    # Load the TSV to get the relation name to ID mapping
+    df = pd.read_csv('data/kg/relations.tsv', sep='\t')
+    return dict(zip(df['relation_name'], df['relation_id']))
+
 def predict_adjuvant_candidates(model, entity_mapping: Dict[str, int], 
                               relation_mapping: Dict[str, int], 
-                              config: dict, top_k: int = 100) -> List[Dict]:
+                              config: dict, top_k: int = 100, reverse_mapping: Dict[str, str] = None, relation_name_mapping: Dict[str, int] = None) -> List[Dict]:
     """
     Predict adjuvant candidates for β-lactam antibiotics.
     """
-    # Define β-lactam antibiotics (common ones)
-    beta_lactams = [
-        "amoxicillin", "ampicillin", "ceftriaxone", "ceftazidime", 
-        "meropenem", "piperacillin", "cephalexin", "cefazolin",
-        "cefuroxime", "cefotaxime", "cefepime", "ertapenem"
-    ]
+    # Define β-lactam antibiotics with their DrugBank IDs
+    beta_lactam_mapping = {
+        "Flucloxacillin": "DB00301", "Piperacillin": "DB00319", "Ampicillin": "DB00415", 
+        "Phenoxymethylpenicillin": "DB00417", "Ceftazidime": "DB00438", "Dicloxacillin": "DB00485", 
+        "Cefotaxime": "DB00493", "Cephalexin": "DB00567", "Nafcillin": "DB00607", 
+        "Oxacillin": "DB00713", "Meropenem": "DB00760", "Cefaclor": "DB00833", 
+        "Benzylpenicillin": "DB01053", "Amoxicillin": "DB01060", "Cefuroxime": "DB01112", 
+        "Cefadroxil": "DB01140", "Cloxacillin": "DB01147", "Ceftriaxone": "DB01212", 
+        "Cefazolin": "DB01327"
+    }
     
-    # Define adjuvant relations
+    # Define adjuvant relations (using the actual relation names from our KG)
     adjuvant_relations = ["targets", "ppi", "interacts_with"]
     
-    # Get all potential adjuvant entities (proteins)
+    # Get all potential adjuvant entities (proteins - UniProt IDs)
     all_entities = list(entity_mapping.keys())
-    protein_entities = [e for e in all_entities if e.startswith('P')]  # UniProt IDs
+    print(f"Debug: Total entities in mapping: {len(all_entities)}")
+    print(f"Debug: Sample entities: {all_entities[:10]}")
     
-    print(f"Found {len(beta_lactams)} β-lactam antibiotics")
+    # Load the entity mapping TSV to get protein entities by original_name
+    df = pd.read_csv('data/kg/entity_mapping.tsv', sep='\t')
+    protein_entities = df[df['original_name'].str.match(r'^[PQOA]', na=False)]['normalized_id'].tolist()
+    print(f"Debug: Protein entities found: {len(protein_entities)}")
+    print(f"Debug: Sample protein entities: {protein_entities[:10]}")
+    
+    print(f"Found {len(beta_lactam_mapping)} β-lactam antibiotics")
     print(f"Found {len(protein_entities)} potential protein adjuvants")
     
     all_predictions = []
     
-    for beta_lactam in beta_lactams:
-        if beta_lactam not in entity_mapping:
-            print(f"Warning: {beta_lactam} not found in entity mapping, skipping...")
+    for drug_name, drugbank_id in beta_lactam_mapping.items():
+        if drugbank_id not in reverse_mapping:
+            print(f"Warning: {drug_name} ({drugbank_id}) not found in reverse mapping, skipping...")
             continue
             
-        beta_lactam_id = entity_mapping[beta_lactam]
+        normalized_id = reverse_mapping[drugbank_id]
+        if normalized_id not in entity_mapping:
+            print(f"Warning: {drug_name} ({drugbank_id} -> {normalized_id}) not found in entity mapping, skipping...")
+            continue
+            
+        beta_lactam_entity_id = entity_mapping[normalized_id]
+        print(f"Processing {drug_name} ({drugbank_id} -> {normalized_id}) -> entity ID {beta_lactam_entity_id}")
         
         for relation in adjuvant_relations:
-            if relation not in relation_mapping:
-                print(f"Warning: {relation} not found in relation mapping, skipping...")
+            if relation not in relation_name_mapping:
+                print(f"Warning: {relation} not found in relation name mapping, skipping...")
                 continue
                 
-            relation_id = relation_mapping[relation]
+            relation_id = relation_name_mapping[relation]
+            if relation_id not in relation_mapping:
+                print(f"Warning: {relation} ({relation_id}) not found in relation mapping, skipping...")
+                continue
+                
+            relation_entity_id = relation_mapping[relation_id]
             
             # Score all potential adjuvant combinations
             predictions = []
@@ -96,8 +142,8 @@ def predict_adjuvant_candidates(model, entity_mapping: Dict[str, int],
                     adjuvant_id = entity_mapping[adjuvant]
                     
                     # Create tensors for prediction
-                    head_tensor = torch.tensor([beta_lactam_id], dtype=torch.long)
-                    rel_tensor = torch.tensor([relation_id], dtype=torch.long)
+                    head_tensor = torch.tensor([beta_lactam_entity_id], dtype=torch.long)
+                    rel_tensor = torch.tensor([relation_entity_id], dtype=torch.long)
                     tail_tensor = torch.tensor([adjuvant_id], dtype=torch.long)
                     
                     # Get prediction score
@@ -105,7 +151,8 @@ def predict_adjuvant_candidates(model, entity_mapping: Dict[str, int],
                         score = model.forward(head_tensor, rel_tensor, tail_tensor).item()
                     
                     predictions.append({
-                        'head': beta_lactam,
+                        'head': drug_name,
+                        'head_id': drugbank_id,
                         'relation': relation,
                         'tail': adjuvant,
                         'score': score
@@ -143,10 +190,18 @@ def main():
     
     print(f"Loaded {len(entity_mapping)} entities and {len(relation_mapping)} relations")
     
+    # Create reverse mapping from DrugBank IDs to normalized IDs
+    reverse_mapping = create_reverse_mapping(entity_mapping)
+    print(f"Created reverse mapping with {len(reverse_mapping)} DrugBank IDs")
+    
+    # Create relation name mapping
+    relation_name_mapping = create_relation_name_mapping(relation_mapping)
+    print(f"Created relation name mapping with {len(relation_name_mapping)} relations")
+    
     # Predict adjuvant candidates
     print("Predicting adjuvant candidates...")
     predictions = predict_adjuvant_candidates(
-        model, entity_mapping, relation_mapping, config, args.top_k
+        model, entity_mapping, relation_mapping, config, args.top_k, reverse_mapping, relation_name_mapping
     )
     
     # Save predictions
