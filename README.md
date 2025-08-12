@@ -2,7 +2,7 @@
 
 A machine learning pipeline that builds a **heterogeneous knowledge graph** from biomedical APIs to discover **novel adjuvants** that can restore the effectiveness of **β-lactam antibiotics**.
 
-**Master's Dissertation Project - Ethan Lucey, Newcastle University**
+
 
 ---
 
