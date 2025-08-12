@@ -1,0 +1,44 @@
+# Beta-Lactam Knowledge Graph Configuration
+organism: 511145  # E. coli K12
+
+# Knowledge Graph Schema
+kg:
+  nodes: data/kg/nodes.tsv
+  edges: data/kg/edges.tsv
+  relations: ["drug-target", "ppi", "drug-drug", "drug-resistance", "drug-bacteria"]
+  
+# Data Sources
+data_sources:
+  drugbank: data/drugbank/full-database.xml
+  string: data/string_interactions.tsv
+  chembl: data/chembl_targets.tsv
+  drugcomb: data/drugcomb_synergy.tsv
+  card: data/card_resistance.tsv
+  
+# Training Configuration
+training:
+  model: TransE
+  embedding_dim: 64
+  epochs: 200
+  valid_ratio: 0.1
+  test_ratio: 0.1
+  random_seed: 42
+  
+# Evaluation Metrics
+eval:
+  k_list: [10, 50, 100]
+  
+# Output Paths
+outputs:
+  model_dir: results/trained_model/
+  metrics: results/metrics.json
+  predictions: results/predicted_links.tsv
+  validation:
+    europe_pmc: results/validation/epmc_hits.tsv
+    drugcomb: results/validation/drugcomb_hits.tsv
+    summary: results/validation/validation_summary.tsv
+    
+# Logging
+logging:
+  level: INFO
+  file: logs/pipeline.log
